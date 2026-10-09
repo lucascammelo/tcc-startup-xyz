@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  TCC Startup XYZ - bucket de replica para recuperacao de desastre (DR).
+  Faca o deploy deste stack em OUTRA regiao (ex.: us-east-2, Ohio) antes do stack principal.
+
+Parameters:
+  NomeProjeto:
+    Type: String
+    Default: startup-xyz
+    AllowedPattern: "^[a-z0-9-]{3,20}$"
+
+Resources:
+  ReplicaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub
+        - "${NomeProjeto}-docs-replica-${Sufixo}"
+        - Sufixo: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  ReplicaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReplicaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SomenteHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ReplicaBucket.Arn
+              - !Sub "${ReplicaBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+Outputs:
+  ReplicaBucketArn:
+    Description: Use este valor no parametro ReplicaBucketArn do stack principal.
+    Value: !GetAtt ReplicaBucket.Arn

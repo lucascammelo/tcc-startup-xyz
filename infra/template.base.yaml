@@ -1,0 +1,608 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  TCC Escola da Nuvem - Startup XYZ: gestao de documentos para IA.
+  API Gateway + Cognito + Lambda + S3 com ciclo de vida (Deep Archive apos 12 meses).
+
+Parameters:
+  NomeProjeto:
+    Type: String
+    Default: startup-xyz
+    AllowedPattern: "^[a-z0-9-]{3,20}$"
+    Description: Prefixo dos recursos (minusculas, numeros e hifen).
+  EmailAlertas:
+    Type: String
+    Default: ""
+    Description: E-mail para alarmes e alerta de orcamento (vazio = sem notificacao por e-mail).
+  CriarOrcamento:
+    Type: String
+    Default: "sim"
+    AllowedValues: ["sim", "nao"]
+    Description: Cria o AWS Budgets (precisa de EmailAlertas). Use "nao" em sandbox sem acesso ao Budgets.
+  OrcamentoMensalUSD:
+    Type: Number
+    Default: 10
+    Description: Limite mensal do AWS Budgets em dolares.
+  DiasAteArquivamento:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    Description: Dias ate mover o documento para S3 Glacier Deep Archive.
+  LabRoleArn:
+    Type: String
+    Default: ""
+    Description: >
+      Somente para AWS Academy / Learner Lab (que bloqueia criar roles). Informe o ARN da LabRole.
+      Em conta propria, deixe vazio para criar roles de menor privilegio.
+  ReplicaBucketArn:
+    Type: String
+    Default: ""
+    Description: ARN do bucket de replica em outra regiao (stack replica.yaml). Vazio = sem replicacao.
+
+Conditions:
+  TemEmail: !Not [!Equals [!Ref EmailAlertas, ""]]
+  TemOrcamento: !And [!Condition TemEmail, !Equals [!Ref CriarOrcamento, "sim"]]
+  UsarLabRole: !Not [!Equals [!Ref LabRoleArn, ""]]
+  CriarRoles: !Equals [!Ref LabRoleArn, ""]
+  TemReplica: !Not [!Equals [!Ref ReplicaBucketArn, ""]]
+  CriarRoleReplicacao: !And [!Condition TemReplica, !Condition CriarRoles]
+
+Resources:
+  # ---------------------------------------------------------------- Armazenamento
+  DocsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Sufixo aleatorio (8 caracteres do ID da stack) em vez do ID da conta:
+      # o nome do bucket aparece nas URLs assinadas que os clientes recebem.
+      BucketName: !Sub
+        - "${NomeProjeto}-docs-${Sufixo}"
+        - Sufixo: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: arquivar-apos-12-meses
+            Status: Enabled
+            Transitions:
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: !Ref DiasAteArquivamento
+            NoncurrentVersionTransitions:
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: 30
+          - Id: limpar-uploads-incompletos
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      ReplicationConfiguration: !If
+        - TemReplica
+        - Role: !If [UsarLabRole, !Ref LabRoleArn, !GetAtt ReplicationRole.Arn]
+          Rules:
+            - Id: replica-dr-outra-regiao
+              Status: Enabled
+              Priority: 1
+              Filter:
+                Prefix: ""
+              DeleteMarkerReplication:
+                Status: Disabled
+              Destination:
+                Bucket: !Ref ReplicaBucketArn
+                StorageClass: DEEP_ARCHIVE
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Projeto
+          Value: !Ref NomeProjeto
+
+  DocsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SomenteHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DocsBucket.Arn
+              - !Sub "${DocsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Condition: CriarRoleReplicacao
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: replicacao-s3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetReplicationConfiguration, s3:ListBucket]
+                Resource: !Sub
+                  - "arn:aws:s3:::${NomeProjeto}-docs-${Sufixo}"
+                  - Sufixo: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+              - Effect: Allow
+                Action: [s3:GetObjectVersionForReplication, s3:GetObjectVersionAcl, s3:GetObjectVersionTagging]
+                Resource: !Sub
+                  - "arn:aws:s3:::${NomeProjeto}-docs-${Sufixo}/*"
+                  - Sufixo: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+              - Effect: Allow
+                Action: [s3:ReplicateObject, s3:ReplicateTags]
+                Resource: !Sub "${ReplicaBucketArn}/*"
+
+  # ---------------------------------------------------------------- Identidade
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${NomeProjeto}-clientes"
+      UserPoolTier: LITE
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "${NomeProjeto}-app"
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      IdTokenValidity: 60
+      AccessTokenValidity: 60
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+
+  # ---------------------------------------------------------------- Roles das Lambdas (menor privilegio)
+  UploadRole:
+    Type: AWS::IAM::Role
+    Condition: CriarRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+      Policies:
+        - PolicyName: somente-gravar-documentos
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${DocsBucket.Arn}/*"
+
+  ListRole:
+    Type: AWS::IAM::Role
+    Condition: CriarRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+      Policies:
+        - PolicyName: somente-listar-documentos
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DocsBucket.Arn
+
+  DownloadRole:
+    Type: AWS::IAM::Role
+    Condition: CriarRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+      Policies:
+        - PolicyName: somente-ler-documentos
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${DocsBucket.Arn}/*"
+
+  # ---------------------------------------------------------------- Lambdas
+  UploadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NomeProjeto}-upload"
+      Runtime: python3.12
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 10
+      Role: !If [UsarLabRole, !Ref LabRoleArn, !GetAtt UploadRole.Arn]
+      Environment:
+        Variables:
+          BUCKET: !Ref DocsBucket
+          MAX_BYTES: "10485760"
+      Code:
+        ZipFile: |
+%%UPLOAD%%
+
+  ListFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NomeProjeto}-list"
+      Runtime: python3.12
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 10
+      Role: !If [UsarLabRole, !Ref LabRoleArn, !GetAtt ListRole.Arn]
+      Environment:
+        Variables:
+          BUCKET: !Ref DocsBucket
+      Code:
+        ZipFile: |
+%%LIST%%
+
+  DownloadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NomeProjeto}-download"
+      Runtime: python3.12
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 10
+      Role: !If [UsarLabRole, !Ref LabRoleArn, !GetAtt DownloadRole.Arn]
+      Environment:
+        Variables:
+          BUCKET: !Ref DocsBucket
+      Code:
+        ZipFile: |
+%%DOWNLOAD%%
+
+  UploadLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NomeProjeto}-upload"
+      RetentionInDays: 30
+  ListLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NomeProjeto}-list"
+      RetentionInDays: 30
+  DownloadLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NomeProjeto}-download"
+      RetentionInDays: 30
+
+  # ---------------------------------------------------------------- API Gateway
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${NomeProjeto}-api"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: cognito
+      RestApiId: !Ref Api
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs: [!GetAtt UserPool.Arn]
+
+  BodyValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      RestApiId: !Ref Api
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+
+  UploadModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId: !Ref Api
+      ContentType: application/json
+      Name: UploadRequest
+      Schema:
+        $schema: "http://json-schema.org/draft-04/schema#"
+        type: object
+        required: [filename]
+        properties:
+          filename: { type: string, minLength: 3, maxLength: 120 }
+
+  FilesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: files
+
+  UploadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !Ref FilesResource
+      PathPart: upload-url
+
+  DownloadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !Ref FilesResource
+      PathPart: download-url
+
+  ListMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref FilesResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ListFunction.Arn}/invocations"
+
+  UploadMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref UploadResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestValidatorId: !Ref BodyValidator
+      RequestModels:
+        application/json: !Ref UploadModel
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UploadFunction.Arn}/invocations"
+
+  DownloadMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref DownloadResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestValidatorId: !Ref BodyValidator
+      RequestParameters:
+        method.request.querystring.key: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DownloadFunction.Arn}/invocations"
+
+  ListPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ListFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/GET/files"
+  UploadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UploadFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/files/upload-url"
+  DownloadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DownloadFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/GET/files/download-url"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [ListMethod, UploadMethod, DownloadMethod]
+    Properties:
+      RestApiId: !Ref Api
+      Description: Versao inicial
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref ApiDeployment
+      StageName: v1
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+          ThrottlingRateLimit: 50
+          ThrottlingBurstLimit: 100
+
+  # ---------------------------------------------------------------- Monitoramento e custos
+  AlertasTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${NomeProjeto}-alertas"
+
+  AlertasEmail:
+    Type: AWS::SNS::Subscription
+    Condition: TemEmail
+    Properties:
+      TopicArn: !Ref AlertasTopic
+      Protocol: email
+      Endpoint: !Ref EmailAlertas
+
+  UploadErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NomeProjeto}-upload-erros"
+      AlarmDescription: Lambda de upload falhou
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref UploadFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertasTopic]
+
+  ListErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NomeProjeto}-list-erros"
+      AlarmDescription: Lambda de listagem falhou
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ListFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertasTopic]
+
+  DownloadErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NomeProjeto}-download-erros"
+      AlarmDescription: Lambda de download falhou
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref DownloadFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertasTopic]
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NomeProjeto}-api-5xx"
+      AlarmDescription: API retornando erro de servidor
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - { Name: ApiName, Value: !Sub "${NomeProjeto}-api" }
+        - { Name: Stage, Value: v1 }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertasTopic]
+
+  Api4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NomeProjeto}-api-4xx-suspeito"
+      AlarmDescription: Muitos acessos negados ou invalidos (possivel tentativa de abuso)
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - { Name: ApiName, Value: !Sub "${NomeProjeto}-api" }
+        - { Name: Stage, Value: v1 }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertasTopic]
+
+  Painel:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${NomeProjeto}-painel"
+      DashboardBody: !Sub |
+        {"widgets":[
+         {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"API: requisicoes e erros","region":"${AWS::Region}","stat":"Sum","period":300,
+          "metrics":[["AWS/ApiGateway","Count","ApiName","${NomeProjeto}-api","Stage","v1"],[".","4XXError",".",".",".","."],[".","5XXError",".",".",".","."]]}},
+         {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"API: latencia (ms)","region":"${AWS::Region}","stat":"p90","period":300,
+          "metrics":[["AWS/ApiGateway","Latency","ApiName","${NomeProjeto}-api","Stage","v1"]]}},
+         {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Lambdas: invocacoes e erros","region":"${AWS::Region}","stat":"Sum","period":300,
+          "metrics":[["AWS/Lambda","Invocations","FunctionName","${UploadFunction}"],[".","Errors",".","."],[".","Invocations",".","${ListFunction}"],[".","Errors",".","."],[".","Invocations",".","${DownloadFunction}"],[".","Errors",".","."]]}},
+         {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"S3: bytes por classe (metrica diaria)","region":"${AWS::Region}","stat":"Average","period":86400,
+          "metrics":[["AWS/S3","BucketSizeBytes","BucketName","${DocsBucket}","StorageType","StandardStorage"],[".",".",".",".",".","DeepArchiveStorage"]]}}
+        ]}
+
+  Orcamento:
+    Type: AWS::Budgets::Budget
+    Condition: TemOrcamento
+    Properties:
+      Budget:
+        BudgetName: !Sub "${NomeProjeto}-orcamento-mensal"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref OrcamentoMensalUSD
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref EmailAlertas }]
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref EmailAlertas }]
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  BucketName:
+    Value: !Ref DocsBucket
+  Regiao:
+    Value: !Ref AWS::Region
+  PainelUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${NomeProjeto}-painel"
