@@ -29,7 +29,7 @@ A avaliadora vai olhar com olhar de vendedora. A ideia central do projeto, que d
 
 > A XYZ trata documento antigo como custo de armazenamento. Mas ele é o ativo que vai treinar os próximos modelos. E como nada é apagado, a decisão de onde guardar vira uma curva de custo que nunca para de subir.
 
-O ROI que mostramos não é "quanto custa a solução", e sim "quanto custa não reestruturar": em 5 anos, US$ 10.161 num servidor, US$ 2.799 no S3 sem ciclo de vida, US$ 1.668 na nossa arquitetura. Premissa: 1 MB por arquivo. O modelo foi validado na AWS Pricing Calculator: US$ 29,83/mês no mês 36, contra US$ 29,79 do modelo. Se perguntarem, sejam honestos: o valor absoluto é baixo porque o volume é pequeno; o que importa é o formato da curva, que multiplica com o tamanho dos arquivos e com o crescimento.
+O ROI que mostramos não é "quanto custa a solução", e sim "quanto custa não reestruturar": em 5 anos, US$ 10.161 num servidor, US$ 2.799 no S3 sem ciclo de vida, US$ 1.954 na nossa arquitetura, já com a réplica em Ohio (sem a réplica seriam US$ 1.668; as outras duas opções não têm cópia em outra região). Premissa: 1 MB por arquivo. O modelo foi validado na AWS Pricing Calculator no mês 36: US$ 35,41/mês com a réplica, contra US$ 34,89 do modelo (a calculadora cobra US$ 0,02/GB na cópia para Ohio, a tabela oficial é US$ 0,01/GB). Se perguntarem, sejam honestos: o valor absoluto é baixo porque o volume é pequeno; o que importa é o formato da curva, que multiplica com o tamanho dos arquivos e com o crescimento.
 
 ## Perguntas prováveis da banca, com respostas
 
@@ -67,10 +67,13 @@ Não existe servidor nosso para isolar. S3, Lambda e API Gateway são gerenciado
 ### Custos
 
 **Quais são os recursos mais caros?**
-No mês 36: o S3 Standard com os últimos 12 meses de arquivos (~586 GB, US$ 13,48/mês) e a saída para a internet (98 GB, US$ 8,82/mês). Depois vêm as transições de Lifecycle (US$ 2,50), o CloudWatch (US$ 1,75) e o API Gateway (US$ 0,88). Total na calculadora: US$ 29,83/mês.
+No mês 36: o S3 Standard com os últimos 12 meses de arquivos (~586 GB, US$ 13,48/mês) e a saída para a internet (98 GB, US$ 8,82/mês). Depois vêm as transições de Lifecycle (US$ 2,50), o CloudWatch (US$ 1,75) e o API Gateway (US$ 0,88). Total na calculadora: US$ 29,83/mês sem a réplica. A réplica em Ohio soma US$ 5,58 (Deep Archive US$ 4,61 e cópia entre regiões US$ 0,98), e o total vai a US$ 35,41/mês.
 
-**Por que a calculadora mostra ~US$ 30 e o slide 3 mostra US$ 1.668?**
-A calculadora mostra um mês. O slide 3 soma 60 meses de uma base que cresce todo mês, porque nada é apagado. Validamos o modelo contra a calculadora no mês 36: a diferença foi de 4 centavos.
+**Por que a calculadora mostra ~US$ 35 e o slide 3 mostra US$ 1.954?**
+A calculadora mostra um mês (o mês 36). O slide 3 soma 60 meses de uma base que cresce todo mês, porque nada é apagado. Por isso não dá para multiplicar o total de 12 meses da calculadora por 5. Validamos o modelo contra a calculadora no mês 36: US$ 34,89 contra US$ 35,41, e a diferença de US$ 0,52 é a tarifa de cópia entre regiões que a calculadora arredonda para cima.
+
+**Quanto custa a réplica?**
+US$ 286 em 5 anos (US$ 1.954 contra US$ 1.668 sem ela). Mesmo com a réplica, a solução custa menos que o S3 sem ciclo de vida e sem réplica (US$ 2.799).
 
 **Como reduziriam ainda mais?**
 Trocar a API REST pela HTTP API (US$ 1 em vez de US$ 3,50 por milhão), abrindo mão da validação de corpo nativa. Colocar o CloudFront na frente dos downloads, porque a saída para a internet (US$ 8,82/mês hoje) é o item que mais cresce com mais clientes. Antecipar o arquivamento se a XYZ aceitar acesso por menos de 12 meses.
@@ -106,4 +109,4 @@ Ao final, a banca precisa conseguir responder:
 
 1. **Qual problema resolvemos?** Guardar 50 mil documentos por mês, para sempre, com cada cliente vendo só os seus.
 2. **Como a solução resolve?** Cognito identifica, Lambda autoriza só a pasta certa, S3 guarda e o Lifecycle arquiva.
-3. **Por que foi a melhor escolha?** Isolamento provado na demo, sem servidor para cair, e 39% do custo do S3 sem ciclo de vida no ano 5 (10% do custo de um servidor EC2).
+3. **Por que foi a melhor escolha?** Isolamento provado na demo, sem servidor para cair, e, já com a réplica, 47% do custo do S3 sem ciclo de vida no ano 5 (12% do custo de um servidor EC2).

@@ -111,7 +111,7 @@ cfn-lint infra/template.yaml infra/replica.yaml
 
 ## Custos
 
-Resumo em `docs/custos.md`. Com 50 mil arquivos de 1 MB por mês, a solução custa US$ 29,83/mês no mês 36 segundo a AWS Pricing Calculator, e US$ 31,19/mês no ano 5, contra US$ 79,79 com tudo no S3 Standard e US$ 307,62 num servidor EC2 com disco.
+Resumo em `docs/custos.md`. Com 50 mil arquivos de 1 MB por mês, a solução com a réplica em Ohio custa US$ 35,41/mês no mês 36 segundo a AWS Pricing Calculator (US$ 29,83 sem a réplica), US$ 37,70/mês no ano 5 e US$ 1.954 em 5 anos, contra US$ 79,79/mês e US$ 2.799 com tudo no S3 Standard e US$ 307,62/mês e US$ 10.161 num servidor EC2 com disco.
 
 ## Limpeza
 

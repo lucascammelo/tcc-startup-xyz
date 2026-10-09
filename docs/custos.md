@@ -2,7 +2,13 @@
 
 Preços oficiais da AWS de outubro/2026, **sem Free Tier**. O cálculo completo está em `modelo_custos.py`.
 
-**Validação:** a estimativa da Equipe EDN na AWS Pricing Calculator deu **US$ 29,83/mês** (US$ 357,96 em 12 meses) para a nossa solução no mês 36. O modelo deu **US$ 29,79** para o mesmo mês. A diferença de 4 centavos vem do arredondamento da saída para a internet (98 GB na calculadora, 97,7 GB no modelo).
+**A solução entregue é a C (com a réplica em Ohio): US$ 1.954 em 5 anos.** A B é a mesma arquitetura sem a réplica, mostrada para deixar claro quanto a recuperação de desastre acrescenta (US$ 286 em 5 anos).
+
+**Validação na AWS Pricing Calculator (mês 36):**
+- Com réplica (C): **US$ 35,41/mês** (US$ 424,92 em 12 meses). O modelo deu **US$ 34,89**. A diferença de US$ 0,52 vem de a calculadora cobrar US$ 0,02/GB na cópia entre regiões, enquanto a tabela oficial de N. Virgínia para Ohio é US$ 0,01/GB (US$ 0,49), mais o arredondamento de 97,7 para 98 GB de downloads.
+- Sem réplica (B): **US$ 29,83/mês** (US$ 357,96 em 12 meses). O modelo deu **US$ 29,79**.
+
+A estimativa mostra o mês 36. **Não multiplique o total de 12 meses por 5**: a base cresce todo mês, então o acumulado vem da soma mês a mês do modelo.
 
 ## Premissas
 
@@ -25,13 +31,13 @@ A calculadora mostra **um mês** e repete esse mês 12 vezes. No case, a base cr
 | Cenário | Mês 12 | Mês 36 | Mês 60 | Acumulado 3 anos | Acumulado 5 anos |
 |---|---|---|---|---|---|
 | A) Tudo em S3 Standard, sem Lifecycle | 25,88 | 52,83 | 79,79 | 1.194 | 2.799 |
-| **B) Nossa solução (Lifecycle)** | **25,88** | **29,79** | **31,19** | **935** | **1.668** |
-| C) Nossa solução + réplica DR | 29,57 | 34,89 | 37,70 | 1.082 | 1.954 |
+| B) Nossa solução sem a réplica | 25,88 | 29,79 | 31,19 | 935 | 1.668 |
+| **C) Nossa solução entregue (Lifecycle + réplica DR)** | **29,57** | **34,89** | **37,70** | **1.082** | **1.954** |
 | D) Servidor EC2 + disco EBS | 82,62 | 195,12 | 307,62 | 4.071 | 10.161 |
 
-**Leitura:** até o mês 12, A e B custam igual (nada foi arquivado ainda). Depois, A sobe em linha reta e B quase para. No mês 60, B custa **39% de A** e **10% de D**.
+**Leitura:** até o mês 12, A e B custam igual (nada foi arquivado ainda). Depois, A sobe em linha reta e B e C quase param. No mês 60, a solução entregue (C) custa **47% de A** e **12% de D**, e é a única das três com cópia em outra região. Sem a réplica (B), seriam 39% e 10%.
 
-**Sensibilidade (arquivo médio de 5 MB, mês 60):** A = US$ 384/mês, B = US$ 130/mês, D = US$ 1.468/mês.
+**Sensibilidade (arquivo médio de 5 MB, mês 60):** A = US$ 384/mês, C = US$ 150/mês (B = US$ 130/mês), D = US$ 1.468/mês.
 
 ### O que cada cenário inclui
 
